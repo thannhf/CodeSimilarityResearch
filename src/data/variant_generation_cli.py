@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from datetime import datetime, timezone
+from src.data.variant_generation_bootstrap import (
+    build_default_loader,
+    build_default_runner,
+)
 
 from src.data.variant_generation_run_summary import (
     VariantGenerationRunSummaryBuilder,
@@ -124,10 +128,11 @@ def main(
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if runner_factory is None or loader_factory is None:
-        parser.error(
-            "Pipeline factories have not been configured yet."
-        )
+    if runner_factory is None:
+        runner_factory = build_default_runner
+
+    if loader_factory is None:
+        loader_factory = build_default_loader
 
     started_at = datetime.now(timezone.utc).isoformat()
 

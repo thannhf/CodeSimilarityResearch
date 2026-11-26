@@ -442,7 +442,7 @@ def test_pipeline_uses_config_selector_version():
 
     assert report.selector_version == "audit-test-2.0.0"
 
-def test_pipeline_uses_config_selector_version():
+def test_pipeline_uses_config_selector_version_short_version():
     config = PairSelectionConfig(
         selector_version="audit-test-2.0"
     )

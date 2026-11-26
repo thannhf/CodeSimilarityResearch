@@ -40,7 +40,20 @@ class CommentsTransformation(Transformation):
 
         while i < n:
             # Raw string literal: R"delimiter(... )delimiter"
-            raw_end = self._raw_string_end(source, i)
+            try:
+                raw_end = self._raw_string_end(source, i)
+            except ValueError:
+                return TransformationResult(
+                    transformation_type=self.name,
+                    source_text=source,
+                    transformed_text=source,
+                    changed=False,
+                    config={
+                        "strategy": "lexical_comment_removal",
+                        "seed": seed,
+                        "skipped_reason": "malformed_raw_string_literal",
+                    },
+                )
             if raw_end is not None:
                 output.append(source[i:raw_end])
                 i = raw_end
@@ -152,34 +165,41 @@ class CommentsTransformation(Transformation):
         source: str,
         start: int,
     ) -> int | None:
-        """Detect and return the end of a C++ raw string literal."""
-        if not source.startswith('R"', start):
+        """Detect prefixed and unprefixed C++ raw string literals."""
+        prefixes = ("u8R", "uR", "UR", "LR", "R")
+
+        prefix = next(
+            (
+                item
+                for item in prefixes
+                if source.startswith(item + '"', start)
+            ),
+            None,
+        )
+
+        if prefix is None:
             return None
 
-        delimiter_start = start + 2
+        delimiter_start = start + len(prefix) + 1
         open_paren = source.find("(", delimiter_start)
 
         if open_paren == -1:
-            return None
+            raise ValueError("malformed_raw_string_literal")
 
         delimiter = source[delimiter_start:open_paren]
 
-        # C++ raw-string delimiters cannot contain these characters
-        # and have a maximum length of 16 characters.
         if len(delimiter) > 16:
-            return None
+            raise ValueError("malformed_raw_string_literal")
 
         if any(
             char in " ()\\\t\r\n" for char in delimiter
         ):
-            return None
+            raise ValueError("malformed_raw_string_literal")
 
         closing = ")" + delimiter + '"'
         close_start = source.find(closing, open_paren + 1)
 
         if close_start == -1:
-            # Unterminated raw string. Preserve source unchanged
-            # from this point by treating it as a literal.
-            return len(source)
+            raise ValueError("malformed_raw_string_literal")
 
         return close_start + len(closing)

@@ -10,6 +10,7 @@ from src.safety.persistence_temp import (
     TempSyncError,
     create_owned_temp_file,
     sync_owned_temp_file,
+    write_owned_temp_bytes,
 )
 
 
@@ -46,6 +47,7 @@ def test_fsync_failure_is_wrapped_without_retry(
     failure,
 ):
     temp = create_owned_temp_file(tmp_path / "destination.bin")
+    write_owned_temp_bytes(temp, b"sync evidence")
     calls = []
 
     def injected_fsync(fd):
@@ -118,7 +120,7 @@ def test_sync_failure_preserves_temp_destination_and_fd(
 
     temp = create_owned_temp_file(destination)
     payload = b"new temp payload"
-    os.write(temp.fd, payload)
+    write_owned_temp_bytes(temp, payload)
 
     fsync_calls = []
 

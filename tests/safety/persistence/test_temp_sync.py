@@ -11,6 +11,7 @@ from src.safety.persistence_temp import (
     TempSyncError,
     create_owned_temp_file,
     sync_owned_temp_file,
+    write_owned_temp_bytes,
 )
 import src.safety.persistence_temp as persistence_temp
 
@@ -26,8 +27,13 @@ def release_temp(temp):
         pass
 
 
+def prepare_sync(temp, payload=b"sync evidence"):
+    write_owned_temp_bytes(temp, payload)
+
+
 def test_sync_calls_fsync_on_retained_fd(tmp_path, monkeypatch):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_sync(temp)
     calls = []
 
     monkeypatch.setattr(
@@ -47,6 +53,7 @@ def test_sync_calls_fsync_on_retained_fd(tmp_path, monkeypatch):
 
 def test_sync_does_not_retry_fsync(tmp_path, monkeypatch):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_sync(temp)
     calls = {"count": 0}
 
     def fake_fsync(fd):
@@ -64,6 +71,7 @@ def test_sync_does_not_retry_fsync(tmp_path, monkeypatch):
 
 def test_sync_keeps_descriptor_open(tmp_path, monkeypatch):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_sync(temp)
 
     monkeypatch.setattr(os, "fsync", lambda fd: None)
 
@@ -80,7 +88,7 @@ def test_sync_keeps_descriptor_open(tmp_path, monkeypatch):
 def test_sync_preserves_temp_content(tmp_path, monkeypatch):
     temp = create_owned_temp_file(tmp_path / "output.bin")
     payload = b"sync must not modify file content"
-    os.write(temp.fd, payload)
+    write_owned_temp_bytes(temp, payload)
 
     monkeypatch.setattr(os, "fsync", lambda fd: None)
 
@@ -218,7 +226,7 @@ def test_sync_rejects_foreign_descriptor(tmp_path, monkeypatch):
     )
 
     try:
-        with pytest.raises(TempSyncError, match="mismatch"):
+        with pytest.raises(TempSyncError, match="ownership|mismatch"):
             sync_owned_temp_file(tampered)
 
         assert calls == []
@@ -244,7 +252,7 @@ def test_sync_rejects_forged_identity(tmp_path, monkeypatch):
     )
 
     try:
-        with pytest.raises(TempSyncError, match="mismatch"):
+        with pytest.raises(TempSyncError, match="ownership|mismatch"):
             sync_owned_temp_file(tampered)
 
         assert calls == []
@@ -254,6 +262,7 @@ def test_sync_rejects_forged_identity(tmp_path, monkeypatch):
 
 def test_sync_wraps_oserror_and_preserves_cause(tmp_path, monkeypatch):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_sync(temp)
     original_error = OSError("simulated fsync failure")
     calls = []
 
@@ -275,6 +284,7 @@ def test_sync_wraps_oserror_and_preserves_cause(tmp_path, monkeypatch):
 
 def test_sync_interrupted_is_not_retried(tmp_path, monkeypatch):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_sync(temp)
     calls = {"count": 0}
     original_error = InterruptedError("simulated interruption")
 
@@ -296,6 +306,7 @@ def test_sync_interrupted_is_not_retried(tmp_path, monkeypatch):
 
 def test_sync_failure_keeps_descriptor_open(tmp_path, monkeypatch):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_sync(temp)
 
     monkeypatch.setattr(
         os,
@@ -317,6 +328,7 @@ def test_sync_failure_keeps_descriptor_open(tmp_path, monkeypatch):
 
 def test_sync_does_not_reopen_temp_path(tmp_path, monkeypatch):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_sync(temp)
     fsync_calls = []
 
     monkeypatch.setattr(
@@ -344,7 +356,7 @@ def test_sync_does_not_cleanup_or_commit(tmp_path, monkeypatch):
     destination = tmp_path / "output.bin"
     temp = create_owned_temp_file(destination)
     payload = b"still only a temp file"
-    os.write(temp.fd, payload)
+    write_owned_temp_bytes(temp, payload)
 
     monkeypatch.setattr(os, "fsync", lambda fd: None)
 
@@ -405,6 +417,7 @@ def test_sync_verifies_ownership_before_fsync(
     monkeypatch,
 ):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_sync(temp)
     events = []
 
     real_verifier = persistence_temp.verify_temp_ownership
@@ -443,6 +456,7 @@ def test_sync_passes_original_ownership_to_verifier(
     monkeypatch,
 ):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_sync(temp)
     verified_objects = []
 
     real_verifier = persistence_temp.verify_temp_ownership
@@ -513,7 +527,7 @@ def test_sync_does_not_write_or_change_temp_size(
     temp = create_owned_temp_file(tmp_path / "output.bin")
     payload = b"payload before sync"
 
-    os.write(temp.fd, payload)
+    write_owned_temp_bytes(temp, payload)
     size_before = os.fstat(temp.fd).st_size
     position_before = os.lseek(temp.fd, 0, os.SEEK_CUR)
 
@@ -544,6 +558,7 @@ def test_sync_has_no_retry_after_fsync_oserror(
     monkeypatch,
 ):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_sync(temp)
     fsync_calls = []
 
     def failing_fsync(fd):

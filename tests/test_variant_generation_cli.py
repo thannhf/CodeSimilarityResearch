@@ -1,4 +1,4 @@
-
+﻿
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -138,6 +138,12 @@ def test_run_cli_filters_requested_split(tmp_path):
     )
 
     assert result is expected_result
+    loader_factory.assert_called_once_with(
+        metadata_path=tmp_path / "metadata" / "samples.csv",
+        splits_path=tmp_path / "metadata" / "source_splits.csv",
+        source_root=tmp_path,
+    )
+    loader.load.assert_called_once()
 
     passed_samples = runner.run.call_args.args[0]
     assert len(passed_samples) == 1
@@ -177,3 +183,4 @@ def test_run_cli_all_keeps_all_samples(tmp_path):
 
     assert result == "batch_result"
     assert runner.run.call_args.args[0] == samples
+

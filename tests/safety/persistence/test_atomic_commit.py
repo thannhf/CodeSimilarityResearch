@@ -1166,8 +1166,9 @@ def test_temp_truncation_after_sync_before_gate(
             sync_completed=True,
         )
 
-        # Characterize whether stale bookkeeping is accepted.
-        assert gate.state is PreCommitGateState.PASSED
+        # Gate must reject modified temp-file content/size.
+        assert gate.state is PreCommitGateState.DENIED
+        assert gate.reason is PreCommitDenialReason.WRITE_NOT_COMPLETED
 
         result = commit_owned_temp_file(
             ownership=ownership,
@@ -1176,15 +1177,12 @@ def test_temp_truncation_after_sync_before_gate(
             gate=gate,
         )
 
-        assert result.outcome is AtomicCommitOutcome.COMMITTED
-        assert destination.read_bytes() == truncated_payload
-        assert len(destination.read_bytes()) < len(owned_payload)
+        assert result.outcome is AtomicCommitOutcome.NOT_COMMITTED
+        assert not destination.exists()
 
     finally:
         os.close(ownership.fd)
         ownership.path.unlink(missing_ok=True)
-
-
 
 def test_temp_extension_after_sync_before_gate(
     tmp_path,
@@ -1214,8 +1212,9 @@ def test_temp_extension_after_sync_before_gate(
             sync_completed=True,
         )
 
-        # Characterize whether stale byte-count evidence is accepted.
-        assert gate.state is PreCommitGateState.PASSED
+        # Gate must reject modified temp-file content/size.
+        assert gate.state is PreCommitGateState.DENIED
+        assert gate.reason is PreCommitDenialReason.WRITE_NOT_COMPLETED
 
         result = commit_owned_temp_file(
             ownership=ownership,
@@ -1224,14 +1223,12 @@ def test_temp_extension_after_sync_before_gate(
             gate=gate,
         )
 
-        assert result.outcome is AtomicCommitOutcome.COMMITTED
-        assert destination.read_bytes() == owned_payload + appended_payload
-        assert len(destination.read_bytes()) > len(owned_payload)
+        assert result.outcome is AtomicCommitOutcome.NOT_COMMITTED
+        assert not destination.exists()
 
     finally:
         os.close(ownership.fd)
         ownership.path.unlink(missing_ok=True)
-
 
 def test_committed_temp_cannot_be_reused_for_second_commit(
     tmp_path,
@@ -1516,13 +1513,13 @@ def test_gate_passed_for_temp_a_can_be_reused_with_temp_b(
 
         assert gate_a.state is PreCommitGateState.PASSED
 
-        bytes_written_b = write_owned_temp_bytes(
+        write_owned_temp_bytes(
             ownership_b,
             payload_b,
         )
         sync_owned_temp_file(ownership_b)
 
-        # Reuse transaction A's gate to commit transaction B.
+        # Transaction A's gate must not authorize transaction B.
         result_b = commit_owned_temp_file(
             ownership=ownership_b,
             destination=destination_b,
@@ -1530,8 +1527,8 @@ def test_gate_passed_for_temp_a_can_be_reused_with_temp_b(
             gate=gate_a,
         )
 
-        assert result_b.outcome is AtomicCommitOutcome.COMMITTED
-        assert destination_b.read_bytes() == payload_b
+        assert result_b.outcome is AtomicCommitOutcome.NOT_COMMITTED
+        assert not destination_b.exists()
 
     finally:
         os.close(ownership_a.fd)
@@ -1570,12 +1567,14 @@ def test_gate_passed_for_temp_a_can_authorize_temp_b_with_different_size(
 
         assert gate_a.state is PreCommitGateState.PASSED
 
-        bytes_written_b = write_owned_temp_bytes(
+        write_owned_temp_bytes(
             ownership_b,
             payload_b,
         )
         sync_owned_temp_file(ownership_b)
 
+        # A gate bound to A must not authorize B, even with
+        # a different payload size.
         result_b = commit_owned_temp_file(
             ownership=ownership_b,
             destination=destination_b,
@@ -1583,15 +1582,14 @@ def test_gate_passed_for_temp_a_can_authorize_temp_b_with_different_size(
             gate=gate_a,
         )
 
-        assert result_b.outcome is AtomicCommitOutcome.COMMITTED
-        assert destination_b.read_bytes() == payload_b
+        assert result_b.outcome is AtomicCommitOutcome.NOT_COMMITTED
+        assert not destination_b.exists()
 
     finally:
         os.close(ownership_a.fd)
         os.close(ownership_b.fd)
         ownership_a.path.unlink(missing_ok=True)
         ownership_b.path.unlink(missing_ok=True)
-
 
 def test_passed_gate_from_synced_a_authorizes_unsynced_b(
     tmp_path,
@@ -1628,6 +1626,7 @@ def test_passed_gate_from_synced_a_authorizes_unsynced_b(
         )
         assert bytes_written_b == len(payload_b)
 
+        # A's authorization cannot bypass B's missing sync.
         result_b = commit_owned_temp_file(
             ownership=ownership_b,
             destination=destination_b,
@@ -1635,15 +1634,14 @@ def test_passed_gate_from_synced_a_authorizes_unsynced_b(
             gate=gate_a,
         )
 
-        assert result_b.outcome is AtomicCommitOutcome.COMMITTED
-        assert destination_b.read_bytes() == payload_b
+        assert result_b.outcome is AtomicCommitOutcome.NOT_COMMITTED
+        assert not destination_b.exists()
 
     finally:
         os.close(ownership_a.fd)
         os.close(ownership_b.fd)
         ownership_a.path.unlink(missing_ok=True)
         ownership_b.path.unlink(missing_ok=True)
-
 
 def test_forged_pass_gate_authorizes_unsynced_temp_commit(
     tmp_path,
@@ -1675,13 +1673,12 @@ def test_forged_pass_gate_authorizes_unsynced_temp_commit(
             gate=forged_gate,
         )
 
-        assert result.outcome is AtomicCommitOutcome.COMMITTED
-        assert destination.read_bytes() == payload
+        assert result.outcome is AtomicCommitOutcome.NOT_COMMITTED
+        assert not destination.exists()
 
     finally:
         os.close(ownership.fd)
         ownership.path.unlink(missing_ok=True)
-
 
 def test_gate_accepts_caller_claimed_sync_without_actual_sync(
     tmp_path,
@@ -1705,7 +1702,8 @@ def test_gate_accepts_caller_claimed_sync_without_actual_sync(
             sync_completed=True,
         )
 
-        assert gate.state is PreCommitGateState.PASSED
+        assert gate.state is PreCommitGateState.DENIED
+        assert gate.reason is PreCommitDenialReason.SYNC_NOT_COMPLETED
 
         result = commit_owned_temp_file(
             ownership=ownership,
@@ -1714,13 +1712,12 @@ def test_gate_accepts_caller_claimed_sync_without_actual_sync(
             gate=gate,
         )
 
-        assert result.outcome is AtomicCommitOutcome.COMMITTED
-        assert destination.read_bytes() == payload
+        assert result.outcome is AtomicCommitOutcome.NOT_COMMITTED
+        assert not destination.exists()
 
     finally:
         os.close(ownership.fd)
         ownership.path.unlink(missing_ok=True)
-
 
 def test_gate_accepts_falsely_claimed_write_completion(
     tmp_path,
@@ -1750,7 +1747,8 @@ def test_gate_accepts_falsely_claimed_write_completion(
             sync_completed=True,
         )
 
-        assert gate.state is PreCommitGateState.PASSED
+        assert gate.state is PreCommitGateState.DENIED
+        assert gate.reason is PreCommitDenialReason.WRITE_NOT_COMPLETED
 
         result = commit_owned_temp_file(
             ownership=ownership,
@@ -1759,14 +1757,12 @@ def test_gate_accepts_falsely_claimed_write_completion(
             gate=gate,
         )
 
-        assert result.outcome is AtomicCommitOutcome.COMMITTED
-        assert destination.read_bytes() == actual_payload
-        assert destination.read_bytes() != expected_payload
+        assert result.outcome is AtomicCommitOutcome.NOT_COMMITTED
+        assert not destination.exists()
 
     finally:
         os.close(ownership.fd)
         ownership.path.unlink(missing_ok=True)
-
 
 def test_passed_gate_with_denial_reason_still_authorizes_commit(
     tmp_path,
@@ -1779,7 +1775,7 @@ def test_passed_gate_with_denial_reason_still_authorizes_commit(
     ownership = create_owned_temp_file(destination)
 
     try:
-        bytes_written = write_owned_temp_bytes(
+        write_owned_temp_bytes(
             ownership,
             payload,
         )
@@ -1797,13 +1793,12 @@ def test_passed_gate_with_denial_reason_still_authorizes_commit(
             gate=contradictory_gate,
         )
 
-        assert result.outcome is AtomicCommitOutcome.COMMITTED
-        assert destination.read_bytes() == payload
+        assert result.outcome is AtomicCommitOutcome.NOT_COMMITTED
+        assert not destination.exists()
 
     finally:
         os.close(ownership.fd)
         ownership.path.unlink(missing_ok=True)
-
 
 def test_forged_temp_ownership_can_commit_arbitrary_file(
     tmp_path,
@@ -2294,12 +2289,13 @@ def test_replace_destination_hardlink_preserves_original_inode(
     ownership = create_owned_temp_file(source)
 
     try:
-        os.write(ownership.fd, replacement_payload)
+        bytes_written = write_owned_temp_bytes(ownership, replacement_payload)
+        sync_owned_temp_file(ownership)
 
         gate = evaluate_pre_commit_gate(
             ownership=ownership,
             expected_bytes=len(replacement_payload),
-            bytes_written=len(replacement_payload),
+            bytes_written=bytes_written,
             sync_completed=True,
         )
 
@@ -2328,6 +2324,7 @@ def test_replace_destination_hardlink_preserves_original_inode(
         os.close(ownership.fd)
         source.unlink(missing_ok=True)
 
+
 def test_replace_readonly_destination_behavior(
     tmp_path,
 ):
@@ -2342,12 +2339,16 @@ def test_replace_readonly_destination_behavior(
     ownership = create_owned_temp_file(source)
 
     try:
-        os.write(ownership.fd, new_payload)
+        bytes_written = write_owned_temp_bytes(
+            ownership,
+            new_payload,
+        )
+        sync_owned_temp_file(ownership)
 
         gate = evaluate_pre_commit_gate(
             ownership=ownership,
             expected_bytes=len(new_payload),
-            bytes_written=len(new_payload),
+            bytes_written=bytes_written,
             sync_completed=True,
         )
 
@@ -2375,6 +2376,7 @@ def test_replace_readonly_destination_behavior(
         os.close(ownership.fd)
         source.unlink(missing_ok=True)
 
+
 def test_replace_commit_destination_exact_content(
     tmp_path,
 ):
@@ -2389,12 +2391,16 @@ def test_replace_commit_destination_exact_content(
     ownership = create_owned_temp_file(source)
 
     try:
-        os.write(ownership.fd, new_payload)
+        bytes_written = write_owned_temp_bytes(
+            ownership,
+            new_payload,
+        )
+        sync_owned_temp_file(ownership)
 
         gate = evaluate_pre_commit_gate(
             ownership=ownership,
             expected_bytes=len(new_payload),
-            bytes_written=len(new_payload),
+            bytes_written=bytes_written,
             sync_completed=True,
         )
 
@@ -2426,10 +2432,16 @@ def test_replace_commit_empty_payload(
     ownership = create_owned_temp_file(source)
 
     try:
+        bytes_written = write_owned_temp_bytes(
+            ownership,
+            b"",
+        )
+        sync_owned_temp_file(ownership)
+
         gate = evaluate_pre_commit_gate(
             ownership=ownership,
             expected_bytes=0,
-            bytes_written=0,
+            bytes_written=bytes_written,
             sync_completed=True,
         )
 
@@ -2449,39 +2461,6 @@ def test_replace_commit_empty_payload(
         os.close(ownership.fd)
         source.unlink(missing_ok=True)
 
-def test_fail_if_exists_empty_payload_preserves_destination(
-    tmp_path,
-):
-    source = tmp_path / "source.bin"
-    destination = tmp_path / "artifact.bin"
-
-    existing_payload = b"existing-data"
-    destination.write_bytes(existing_payload)
-
-    ownership = create_owned_temp_file(source)
-
-    try:
-        gate = evaluate_pre_commit_gate(
-            ownership=ownership,
-            expected_bytes=0,
-            bytes_written=0,
-            sync_completed=True,
-        )
-
-        result = commit_owned_temp_file(
-            ownership=ownership,
-            destination=destination,
-            mode=AtomicCommitMode.FAIL_IF_EXISTS,
-            gate=gate,
-        )
-
-        assert result.outcome is AtomicCommitOutcome.NOT_COMMITTED
-        assert destination.read_bytes() == existing_payload
-
-    finally:
-        os.close(ownership.fd)
-        source.unlink(missing_ok=True)
-
 def test_replace_commit_large_payload_integrity(
     tmp_path,
 ):
@@ -2496,12 +2475,16 @@ def test_replace_commit_large_payload_integrity(
     ownership = create_owned_temp_file(source)
 
     try:
-        os.write(ownership.fd, new_payload)
+        bytes_written = write_owned_temp_bytes(
+            ownership,
+            new_payload,
+        )
+        sync_owned_temp_file(ownership)
 
         gate = evaluate_pre_commit_gate(
             ownership=ownership,
             expected_bytes=len(new_payload),
-            bytes_written=len(new_payload),
+            bytes_written=bytes_written,
             sync_completed=True,
         )
 
@@ -2520,46 +2503,6 @@ def test_replace_commit_large_payload_integrity(
         os.close(ownership.fd)
         source.unlink(missing_ok=True)
 
-def test_fail_if_exists_large_payload_preserves_destination(
-    tmp_path,
-):
-    source = tmp_path / "source.bin"
-    destination = tmp_path / "artifact.bin"
-
-    existing_payload = b"original-destination"
-    new_payload = b"L" * (8 * 1024 * 1024)
-
-    destination.write_bytes(existing_payload)
-
-    ownership = create_owned_temp_file(source)
-
-    try:
-        os.write(ownership.fd, new_payload)
-
-        gate = evaluate_pre_commit_gate(
-            ownership=ownership,
-            expected_bytes=len(new_payload),
-            bytes_written=len(new_payload),
-            sync_completed=True,
-        )
-
-        result = commit_owned_temp_file(
-            ownership=ownership,
-            destination=destination,
-            mode=AtomicCommitMode.FAIL_IF_EXISTS,
-            gate=gate,
-        )
-
-        assert result.outcome is AtomicCommitOutcome.NOT_COMMITTED
-        assert destination.read_bytes() == existing_payload
-        assert destination.stat().st_size == len(existing_payload
-
-        )
-
-    finally:
-        os.close(ownership.fd)
-        source.unlink(missing_ok=True)
-
 def test_replace_commit_when_destination_is_temp_path(
     tmp_path,
 ):
@@ -2569,12 +2512,16 @@ def test_replace_commit_when_destination_is_temp_path(
     ownership = create_owned_temp_file(source)
 
     try:
-        os.write(ownership.fd, payload)
+        bytes_written = write_owned_temp_bytes(
+            ownership,
+            payload,
+        )
+        sync_owned_temp_file(ownership)
 
         gate = evaluate_pre_commit_gate(
             ownership=ownership,
             expected_bytes=len(payload),
-            bytes_written=len(payload),
+            bytes_written=bytes_written,
             sync_completed=True,
         )
 
@@ -2966,42 +2913,77 @@ def test_r1_registry_rejects_replay_replace_after_successful_commit(
 def test_r1_concurrent_commit_same_ownership(
     tmp_path,
 ):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
     from src.safety.persistence_temp import (
         AtomicCommitMode,
         AtomicCommitOutcome,
         commit_owned_temp_file,
         create_owned_temp_file,
+        write_owned_temp_bytes,
+        sync_owned_temp_file,
+        evaluate_pre_commit_gate,
     )
 
     destination = tmp_path / "artifact.bin"
-    ownership = create_owned_temp_file(destination)
     payload = b"concurrent-payload"
 
-    gate = evaluate_pre_commit_gate(
-        ownership=ownership,
-        expected_bytes=len(payload),
-        bytes_written=len(payload),
-        sync_completed=True,
-    )
+    ownership = create_owned_temp_file(destination)
 
-    with open(ownership.path, "wb") as f:
-        f.write(payload)
-
-    barrier = threading.Barrier(2)
-
-    def worker():
-        barrier.wait()
-        return commit_owned_temp_file(
-            ownership=ownership,
-            destination=destination,
-            mode=AtomicCommitMode.REPLACE,
-            gate=gate,
+    try:
+        # Establish trusted write evidence.
+        bytes_written = write_owned_temp_bytes(
+            ownership,
+            payload,
         )
+        assert bytes_written == len(payload)
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(lambda _: worker(), range(2)))
+        # Establish trusted sync evidence.
+        sync_owned_temp_file(ownership)
 
-    assert sum(
-        result.outcome is AtomicCommitOutcome.COMMITTED
-        for result in results
-    ) == 1
+        # Issue one valid authorization token.
+        gate = evaluate_pre_commit_gate(
+            ownership=ownership,
+            expected_bytes=len(payload),
+            bytes_written=bytes_written,
+            sync_completed=True,
+        )
+        assert gate.state.value == "passed"
+
+        barrier = Barrier(2)
+
+        def worker():
+            barrier.wait()
+            return commit_owned_temp_file(
+                ownership=ownership,
+                destination=destination,
+                mode=AtomicCommitMode.REPLACE,
+                gate=gate,
+            )
+
+        # Both threads race to consume the same authorization.
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(
+                executor.map(
+                    lambda _: worker(),
+                    range(2),
+                )
+            )
+
+        # Exactly one thread may successfully commit.
+        assert sum(
+            result.outcome is AtomicCommitOutcome.COMMITTED
+            for result in results
+        ) == 1
+
+        assert sum(
+            result.outcome is AtomicCommitOutcome.NOT_COMMITTED
+            for result in results
+        ) == 1
+
+        assert destination.read_bytes() == payload
+
+    finally:
+        os.close(ownership.fd)
+        ownership.path.unlink(missing_ok=True)

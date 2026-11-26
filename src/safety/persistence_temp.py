@@ -1,6 +1,7 @@
 from __future__ import annotations
-
+import hashlib
 import os
+import secrets
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,6 +121,12 @@ class TempOwnershipRegistryRecord:
     lifecycle: TempOwnershipLifecycle = (
         TempOwnershipLifecycle.ACTIVE
     )
+    write_completed: bool = False
+    bytes_written: int = 0
+    payload_digest: str | None = None
+    sync_completed: bool = False
+    authorization_consumed: bool = False
+    authorization_token: str | None = None
 
 _TEMP_OWNERSHIP_REGISTRY: dict[
     str,
@@ -388,63 +395,96 @@ class TempWriteError(Exception):
 class TempSyncError(Exception):
     """Raised when syncing an owned temp file fails."""
 
+
 def write_owned_temp_bytes(
     ownership: TempFileOwnership,
     payload: bytes,
 ) -> int:
     interrupted_retries = 0
-    
+
     if not isinstance(ownership, TempFileOwnership):
         raise TypeError("ownership must be TempFileOwnership")
 
     if not isinstance(payload, bytes):
         raise TypeError("payload must be bytes")
 
-    verification = verify_temp_ownership(ownership)
-
-    if verification.state is not OwnershipVerificationState.VERIFIED:
-        raise TempWriteError(
-            (
-                "Temp ownership verification failed before write: "
-                f"{verification.state.value}"
-            ),
-            bytes_written=0,
+    with _TEMP_OWNERSHIP_REGISTRY_LOCK:
+        registered = _TEMP_OWNERSHIP_REGISTRY.get(
+            ownership.transaction_id
         )
 
-    total_written = 0
-    view = memoryview(payload)
-
-    while total_written < len(payload):
-        try:
-            written = os.write(
-                ownership.fd,
-                view[total_written:],
+        if (
+            registered is None
+            or registered.ownership is not ownership
+            or registered.lifecycle is not TempOwnershipLifecycle.ACTIVE
+        ):
+            raise TempWriteError(
+                "Temp ownership is not registered or active.",
+                bytes_written=0,
             )
-        except InterruptedError as exc:
-            interrupted_retries += 1
 
-            if interrupted_retries > TEMP_WRITE_MAX_INTERRUPTED_RETRIES:
+        # Invalidate previous evidence before starting a new write.
+        registered.write_completed = False
+        registered.bytes_written = 0
+        registered.payload_digest = None
+        registered.sync_completed = False
+
+        verification = verify_temp_ownership(ownership)
+
+        if verification.state is not OwnershipVerificationState.VERIFIED:
+            raise TempWriteError(
+                (
+                    "Temp ownership verification failed before write: "
+                    f"{verification.state.value}"
+                ),
+                bytes_written=0,
+            )
+
+        total_written = 0
+        view = memoryview(payload)
+
+        while total_written < len(payload):
+            try:
+                written = os.write(
+                    ownership.fd,
+                    view[total_written:],
+                )
+            except InterruptedError as exc:
+                interrupted_retries += 1
+
+                if interrupted_retries > TEMP_WRITE_MAX_INTERRUPTED_RETRIES:
+                    registered.bytes_written = total_written
+                    raise TempWriteError(
+                        "Write interrupted too many times.",
+                        bytes_written=total_written,
+                    ) from exc
+
+                continue
+
+            except OSError as exc:
+                registered.bytes_written = total_written
                 raise TempWriteError(
-                    "Write interrupted too many times.",
+                    "Failed while writing owned temp file.",
                     bytes_written=total_written,
                 ) from exc
 
-            continue
-        except OSError as exc:
-            raise TempWriteError(
-                "Failed while writing owned temp file.",
-                bytes_written=total_written,
-            ) from exc
+            if written <= 0:
+                registered.bytes_written = total_written
+                raise TempWriteError(
+                    "Temp file write returned zero bytes.",
+                    bytes_written=total_written,
+                )
 
-        if written <= 0:
-            raise TempWriteError(
-                "Temp file write returned zero bytes.",
-                bytes_written=total_written,
-            )
+            total_written += written
+            interrupted_retries = 0
 
-        total_written += written
-        interrupted_retries = 0
-    return total_written
+        registered.write_completed = True
+        registered.bytes_written = total_written
+        registered.payload_digest = hashlib.sha256(payload).hexdigest()
+        registered.sync_completed = False
+
+        return total_written
+
 
 def sync_owned_temp_file(
     ownership: TempFileOwnership,
@@ -452,28 +492,73 @@ def sync_owned_temp_file(
     """
     Sync an owned temp file using its retained descriptor.
 
+    Requires completed write evidence for the same active ownership.
     Does not write payload, close the descriptor, commit,
     or perform cleanup.
     """
     if not isinstance(ownership, TempFileOwnership):
         raise TypeError("ownership must be TempFileOwnership")
 
-    verification = verify_temp_ownership(ownership)
-
-    if verification.state is not OwnershipVerificationState.VERIFIED:
-        raise TempSyncError(
-            (
-                "Temp ownership verification failed before sync: "
-                f"{verification.state.value}"
-            )
+    with _TEMP_OWNERSHIP_REGISTRY_LOCK:
+        registered = _TEMP_OWNERSHIP_REGISTRY.get(
+            ownership.transaction_id
         )
 
-    try:
-        os.fsync(ownership.fd)
-    except OSError as exc:
-        raise TempSyncError(
-            "Failed to sync owned temp file."
-        ) from exc
+        if (
+            registered is None
+            or registered.ownership is not ownership
+            or registered.lifecycle is not TempOwnershipLifecycle.ACTIVE
+        ):
+            raise TempSyncError(
+                "Temp ownership is not registered or active."
+            )
+
+        verification = verify_temp_ownership(ownership)
+
+        if verification.state is not OwnershipVerificationState.VERIFIED:
+            raise TempSyncError(
+                (
+                    "Temp ownership verification failed before sync: "
+                    f"{verification.state.value}"
+                )
+            )
+
+        if (
+            not registered.write_completed
+            or registered.payload_digest is None
+        ):
+            raise TempSyncError(
+                "Sync requires completed write evidence."
+            )
+
+        if registered.sync_completed:
+            raise TempSyncError(
+                "Temp file has already been synced for this write."
+            )
+
+        try:
+            descriptor_stat = os.fstat(ownership.fd)
+        except OSError as exc:
+            raise TempSyncError(
+                "Failed to inspect owned temp file before sync."
+            ) from exc
+
+        if descriptor_stat.st_size != registered.bytes_written:
+            raise TempSyncError(
+                "Temp file size differs from registered write evidence."
+            )
+
+        try:
+            os.fsync(ownership.fd)
+        except OSError as exc:
+            registered.sync_completed = False
+            raise TempSyncError(
+                "Failed to sync owned temp file."
+            ) from exc
+
+        registered.sync_completed = True
+
+
 
 def sync_committed_directory(
     destination: Path,
@@ -541,6 +626,9 @@ class PreCommitDenialReason(Enum):
 class PreCommitGateResult:
     state: PreCommitGateState
     reason: PreCommitDenialReason | None = None
+    transaction_id: str | None = None
+    payload_digest: str | None = None
+    authorization_token: str | None = None
 
     @property
     def allowed(self) -> bool:
@@ -554,23 +642,15 @@ def evaluate_pre_commit_gate(
     bytes_written: int,
     sync_completed: bool,
 ) -> PreCommitGateResult:
-    """Evaluate whether a temp file is eligible to enter commit stage.
-
-    This function is an authorization decision only.
-    It does not commit, sync, write, close, or cleanup.
-    """
+    """Issue transaction-bound commit authorization from trusted evidence."""
 
     if not isinstance(ownership, TempFileOwnership):
         raise TypeError("ownership must be TempFileOwnership")
 
-    if isinstance(expected_bytes, bool) or not isinstance(
-        expected_bytes, int
-    ):
+    if isinstance(expected_bytes, bool) or not isinstance(expected_bytes, int):
         raise TypeError("expected_bytes must be an integer")
 
-    if isinstance(bytes_written, bool) or not isinstance(
-        bytes_written, int
-    ):
+    if isinstance(bytes_written, bool) or not isinstance(bytes_written, int):
         raise TypeError("bytes_written must be an integer")
 
     if not isinstance(sync_completed, bool):
@@ -582,29 +662,74 @@ def evaluate_pre_commit_gate(
     if bytes_written < 0:
         raise ValueError("bytes_written must be non-negative")
 
-    verification = verify_temp_ownership(ownership)
-
-    if verification.state is not OwnershipVerificationState.VERIFIED:
-        return PreCommitGateResult(
-            state=PreCommitGateState.DENIED,
-            reason=PreCommitDenialReason.OWNERSHIP_NOT_VERIFIED,
+    with _TEMP_OWNERSHIP_REGISTRY_LOCK:
+        registered = _TEMP_OWNERSHIP_REGISTRY.get(
+            ownership.transaction_id
         )
 
-    if bytes_written != expected_bytes:
-        return PreCommitGateResult(
-            state=PreCommitGateState.DENIED,
-            reason=PreCommitDenialReason.WRITE_NOT_COMPLETED,
-        )
+        if (
+            registered is None
+            or registered.ownership is not ownership
+            or registered.lifecycle is not TempOwnershipLifecycle.ACTIVE
+        ):
+            return PreCommitGateResult(
+                state=PreCommitGateState.DENIED,
+                reason=PreCommitDenialReason.OWNERSHIP_NOT_VERIFIED,
+            )
 
-    if not sync_completed:
-        return PreCommitGateResult(
-            state=PreCommitGateState.DENIED,
-            reason=PreCommitDenialReason.SYNC_NOT_COMPLETED,
-        )
+        verification = verify_temp_ownership(ownership)
 
-    return PreCommitGateResult(
-        state=PreCommitGateState.PASSED,
-    )
+        if verification.state is not OwnershipVerificationState.VERIFIED:
+            return PreCommitGateResult(
+                state=PreCommitGateState.DENIED,
+                reason=PreCommitDenialReason.OWNERSHIP_NOT_VERIFIED,
+            )
+
+        if (
+            not registered.write_completed
+            or registered.payload_digest is None
+            or registered.bytes_written != expected_bytes
+            or bytes_written != registered.bytes_written
+        ):
+            return PreCommitGateResult(
+                state=PreCommitGateState.DENIED,
+                reason=PreCommitDenialReason.WRITE_NOT_COMPLETED,
+            )
+
+        if (
+            not registered.sync_completed
+            or not sync_completed
+            or registered.authorization_consumed
+            or registered.authorization_token is not None
+        ):
+            return PreCommitGateResult(
+                state=PreCommitGateState.DENIED,
+                reason=PreCommitDenialReason.SYNC_NOT_COMPLETED,
+            )
+
+        try:
+            actual_size = os.fstat(ownership.fd).st_size
+        except OSError:
+            return PreCommitGateResult(
+                state=PreCommitGateState.DENIED,
+                reason=PreCommitDenialReason.WRITE_NOT_COMPLETED,
+            )
+
+        if actual_size != registered.bytes_written:
+            return PreCommitGateResult(
+                state=PreCommitGateState.DENIED,
+                reason=PreCommitDenialReason.WRITE_NOT_COMPLETED,
+            )
+
+        token = secrets.token_urlsafe(32)
+        registered.authorization_token = token
+
+        return PreCommitGateResult(
+            state=PreCommitGateState.PASSED,
+            transaction_id=ownership.transaction_id,
+            payload_digest=registered.payload_digest,
+            authorization_token=token,
+        )
 
 
 class AtomicCommitMode(Enum):
@@ -677,6 +802,35 @@ def commit_owned_temp_file(
                 destination=destination,
                 error=RuntimeError("Pre-commit gate denied commit."),
             )
+
+        if (
+            gate.transaction_id != ownership.transaction_id
+            or gate.payload_digest is None
+            or gate.authorization_token is None
+            or registered.payload_digest != gate.payload_digest
+            or registered.authorization_token is None
+            or registered.authorization_consumed
+            or not secrets.compare_digest(
+                gate.authorization_token,
+                registered.authorization_token,
+            )
+            or not registered.write_completed
+            or not registered.sync_completed
+        ):
+            return AtomicCommitResult(
+                outcome=AtomicCommitOutcome.NOT_COMMITTED,
+                mode=mode,
+                destination=destination,
+                error=RuntimeError(
+                    "Pre-commit authorization is invalid, "
+                    "foreign, or already consumed."
+                ),
+            )
+
+        # Consume authorization before the atomic filesystem operation.
+        # Any failure remains non-replayable by design.
+        registered.authorization_consumed = True
+        registered.authorization_token = None
 
         if ownership.path.parent != destination.parent:
             raise ValueError(

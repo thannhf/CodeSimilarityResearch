@@ -143,3 +143,26 @@ def test_metadata():
     assert result.config["strategy"] == "lexical_comment_removal"
     assert result.config["preserve_newlines"] is True
     assert result.config["seed"] == 42
+
+def test_malformed_prefixed_raw_string_fails_closed():
+    source = 'auto s = u8R"invalid delimiter(/* comment */)invalid delimiter";'
+
+    result = CommentsTransformation().transform(source)
+
+    assert result.transformed_text == source
+    assert result.changed is False
+    assert result.config["skipped_reason"] == (
+        "malformed_raw_string_literal"
+    )
+
+
+def test_prefixed_raw_string_without_open_paren_fails_closed():
+    source = 'auto s = u8R"delimiter_without_paren /* comment */;'
+
+    result = CommentsTransformation().transform(source)
+
+    assert result.transformed_text == source
+    assert result.changed is False
+    assert result.config["skipped_reason"] == (
+        "malformed_raw_string_literal"
+    )

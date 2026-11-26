@@ -126,3 +126,25 @@ def test_main_returns_nonzero_for_failed_run(tmp_path):
 
     assert exit_code == 1
     assert report_path.exists()
+
+
+def test_main_handles_runner_exception(tmp_path):
+    dataset_root = tmp_path / "poj104"
+    dataset_root.mkdir()
+
+    runner = Mock()
+    runner.run.side_effect = RuntimeError("runner crashed")
+
+    loader = Mock()
+    loader.load.return_value = []
+
+    exit_code = main(
+        [
+            "--dataset-root", str(dataset_root),
+            "--report-path", str(tmp_path / "summary.json"),
+        ],
+        runner_factory=Mock(return_value=runner),
+        loader_factory=Mock(return_value=loader),
+    )
+
+    assert exit_code == 1

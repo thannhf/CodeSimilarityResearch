@@ -40,12 +40,19 @@ def evaluate_valid(temp, **overrides):
     return evaluate_pre_commit_gate(**args)
 
 
+def prepare_gate_evidence(temp, payload=b"x" * 10, *, sync=True):
+    persistence_temp.write_owned_temp_bytes(temp, payload)
+    if sync:
+        persistence_temp.sync_owned_temp_file(temp)
+
+
 def test_gate_passes_with_verified_ownership_and_complete_write(
     tmp_path,
 ):
     temp = create_owned_temp_file(tmp_path / "output.bin")
 
     try:
+        prepare_gate_evidence(temp)
         result = evaluate_valid(temp)
 
         assert result.state is PreCommitGateState.PASSED
@@ -123,6 +130,7 @@ def test_gate_denies_sync_not_completed(tmp_path):
     temp = create_owned_temp_file(tmp_path / "output.bin")
 
     try:
+        prepare_gate_evidence(temp, sync=False)
         result = evaluate_valid(
             temp,
             sync_completed=False,
@@ -138,6 +146,7 @@ def test_gate_passes_empty_payload_when_sync_completed(tmp_path):
     temp = create_owned_temp_file(tmp_path / "output.bin")
 
     try:
+        prepare_gate_evidence(temp, b"")
         result = evaluate_valid(
             temp,
             expected_bytes=0,
@@ -218,6 +227,7 @@ def test_gate_does_not_call_fsync_or_write(
     monkeypatch,
 ):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_gate_evidence(temp)
     fsync_calls = []
     write_calls = []
 
@@ -251,7 +261,8 @@ def test_gate_does_not_modify_temp_or_destination(
 
     temp = create_owned_temp_file(destination)
     payload = b"temp payload"
-    os.write(temp.fd, payload)
+    persistence_temp.write_owned_temp_bytes(temp, payload)
+    persistence_temp.sync_owned_temp_file(temp)
 
     original_temp_bytes = temp.path.read_bytes()
     original_temp_size = os.fstat(temp.fd).st_size
@@ -278,6 +289,7 @@ def test_gate_does_not_cleanup_temp(tmp_path):
     temp = create_owned_temp_file(tmp_path / "output.bin")
 
     try:
+        prepare_gate_evidence(temp)
         evaluate_valid(temp)
 
         assert temp.path.exists()
@@ -322,6 +334,7 @@ def test_gate_does_not_commit_destination(tmp_path):
     temp = create_owned_temp_file(destination)
 
     try:
+        prepare_gate_evidence(temp)
         result = evaluate_valid(temp)
 
         assert result.allowed is True
@@ -335,6 +348,7 @@ def test_gate_reverifies_ownership_on_each_evaluation(
     monkeypatch,
 ):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_gate_evidence(temp)
     calls = []
 
     real_verifier = persistence_temp.verify_temp_ownership
@@ -354,7 +368,7 @@ def test_gate_reverifies_ownership_on_each_evaluation(
         second = evaluate_valid(temp)
 
         assert first.allowed is True
-        assert second.allowed is True
+        assert second.allowed is False
         assert len(calls) == 2
         assert calls[0] is temp
         assert calls[1] is temp
@@ -469,6 +483,7 @@ def test_gate_verifies_ownership_once_per_invocation(
     monkeypatch,
 ):
     temp = create_owned_temp_file(tmp_path / "output.bin")
+    prepare_gate_evidence(temp)
     verification_calls = []
 
     real_verifier = persistence_temp.verify_temp_ownership

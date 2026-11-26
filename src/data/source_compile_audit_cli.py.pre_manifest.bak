@@ -1,0 +1,105 @@
+﻿from __future__ import annotations
+
+import argparse
+
+from src.data.source_compile_audit_config import SourceCompileAuditConfig
+from src.data.source_compile_audit_runner import SourceCompileAuditRunner
+from src.data.source_compile_audit_exporter import SourceCompileAuditExporter
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Audit POJ104 source compile validity."
+    )
+    parser.add_argument("--compiler", default="g++")
+    parser.add_argument("--standard", default="c++17")
+    parser.add_argument("--timeout", type=int, default=10)
+
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--limit",
+        type=int,
+        help="Partial audit limit. Only audit report is exported.",
+    )
+    mode_group.add_argument(
+        "--full",
+        action="store_true",
+        help="Explicitly authorize full dataset audit and subset export.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    if not args.full and args.limit is None:
+        print("ERROR: choose --limit N or explicitly authorize with --full.")
+        return 2
+
+    if args.limit is not None and args.limit <= 0:
+        print("ERROR: --limit must be positive.")
+        return 2
+
+    try:
+        config = SourceCompileAuditConfig(
+            compiler=args.compiler,
+            standard=args.standard,
+            timeout_seconds=args.timeout,
+        )
+    except (TypeError, ValueError) as exc:
+        print(f"ERROR: Invalid configuration: {exc}")
+        return 2
+
+    runner = SourceCompileAuditRunner(config)
+    results, summary = runner.run(limit=args.limit)
+
+    is_full = args.full
+
+    print("===== SOURCE COMPILE AUDIT =====")
+    print(f"Mode: {'FULL' if is_full else 'PARTIAL'}")
+    print(f"Audited: {summary.total}")
+    print(f"PASS: {summary.passed}")
+    print(f"FAIL: {summary.failed}")
+    print(f"ERROR: {summary.errors}")
+
+    exporter = SourceCompileAuditExporter()
+
+    if not is_full:
+        audit_count = exporter.export_audit_only(
+            results,
+            config.audit_output_path,
+        )
+        print(f"Audit CSV records: {audit_count}")
+        print(f"Audit report: {config.audit_output_path}")
+        print("Partial audit: official subset export skipped.")
+        return 0 if summary.errors == 0 else 1
+
+    if summary.errors > 0:
+        audit_count = exporter.export_audit_only(
+            results,
+            config.audit_output_path,
+        )
+        print(f"Audit CSV records: {audit_count}")
+        print(f"Audit report: {config.audit_output_path}")
+        print("Full audit has ERROR results; official subset export blocked.")
+        return 1
+
+    audit_count, subset_count = exporter.export(
+        results=results,
+        metadata_path=config.metadata_path,
+        splits_path=config.splits_path,
+        audit_output_path=config.audit_output_path,
+        valid_subset_output_path=config.valid_subset_output_path,
+    )
+
+    print(f"Audit CSV records: {audit_count}")
+    print(f"Compile-valid subset: {subset_count}")
+    print(f"Audit report: {config.audit_output_path}")
+    print(f"Valid subset: {config.valid_subset_output_path}")
+    print("FULL AUDIT COMPLETE")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
